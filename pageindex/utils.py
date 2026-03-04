@@ -19,6 +19,15 @@ from types import SimpleNamespace as config
 
 CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY")
 
+def _retry_delay_for_exception(e, attempt):
+    """Return sleep seconds: longer for 429 (rate limit) so TPM can reset."""
+    err_str = str(e).lower()
+    if "429" in err_str or "rate_limit" in err_str:
+        # TPM limits reset per minute; wait long enough for quota to refresh
+        return 60
+    return 1
+
+
 def count_tokens(text, model=None):
     if not text:
         return 0
@@ -51,7 +60,10 @@ def ChatGPT_API_with_finish_reason(model, prompt, api_key=CHATGPT_API_KEY, chat_
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                time.sleep(1)  # Wait for 1秒 before retrying
+                delay = _retry_delay_for_exception(e, i)
+                if delay > 1:
+                    print(f'Rate limit (429) — waiting {delay}s before retry...')
+                time.sleep(delay)
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 return "Error"
@@ -80,7 +92,10 @@ def ChatGPT_API(model, prompt, api_key=CHATGPT_API_KEY, chat_history=None):
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                time.sleep(1)  # Wait for 1秒 before retrying
+                delay = _retry_delay_for_exception(e, i)
+                if delay > 1:
+                    print(f'Rate limit (429) — waiting {delay}s before retry...')
+                time.sleep(delay)
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 return "Error"
@@ -102,7 +117,10 @@ async def ChatGPT_API_async(model, prompt, api_key=CHATGPT_API_KEY):
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                await asyncio.sleep(1)  # Wait for 1s before retrying
+                delay = _retry_delay_for_exception(e, i)
+                if delay > 1:
+                    print(f'Rate limit (429) — waiting {delay}s before retry...')
+                await asyncio.sleep(delay)
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 return "Error"  
@@ -155,6 +173,33 @@ def extract_json(content):
         logging.error(f"Unexpected error while extracting JSON: {e}")
         return {}
 
+
+def extract_first_json_object(text):
+    """When LLM returns multiple JSON objects or trailing text, parse the first complete object."""
+    text = text.strip()
+    # Strip ```json ... ``` if present
+    if "```json" in text:
+        start_idx = text.find("```json") + 7
+        end_idx = text.rfind("```")
+        if end_idx > start_idx:
+            text = text[start_idx:end_idx].strip()
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def write_node_id(data, node_id=0):
     if isinstance(data, dict):
         data['node_id'] = str(node_id).zfill(4)
@@ -195,7 +240,31 @@ def structure_to_list(structure):
             nodes.extend(structure_to_list(item))
         return nodes
 
-    
+
+def propagate_parent_page_ranges(tree):
+    """
+    Set each parent node's start_index and end_index to span all its children.
+    So a section like "The Future Outlook" with subsections 3-4, 4-6, 6-7, 7-9
+    becomes start_index=3, end_index=9 (or 2-9 if the parent had intro pages).
+    Call this on the final structure so parent ranges are consistent.
+    """
+    if isinstance(tree, list):
+        for item in tree:
+            propagate_parent_page_ranges(item)
+        return
+    if not isinstance(tree, dict):
+        return
+    if not tree.get('nodes'):
+        return
+    for child in tree['nodes']:
+        propagate_parent_page_ranges(child)
+    starts = [n.get('start_index') for n in tree['nodes'] if n.get('start_index') is not None]
+    ends = [n.get('end_index') for n in tree['nodes'] if n.get('end_index') is not None]
+    if starts and ends:
+        tree['start_index'] = min(starts)
+        tree['end_index'] = max(ends)
+
+
 def get_leaf_nodes(structure):
     if isinstance(structure, dict):
         if not structure['nodes']:
@@ -497,6 +566,25 @@ def remove_fields(data, fields=['text']):
     elif isinstance(data, list):
         return [remove_fields(item, fields) for item in data]
     return data
+
+
+def create_node_mapping(tree):
+    """Build a flat node_id -> node map from a tree (list or dict with optional 'nodes').
+    Handles both top-level 'structure' list and nested trees. Adds page_index from start_index if missing.
+    """
+    nodes = structure_to_list(tree)
+    node_map = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = node.get('node_id')
+        if nid is not None:
+            node = copy.deepcopy(node)
+            if 'page_index' not in node and 'start_index' in node:
+                node['page_index'] = node['start_index']
+            node_map[str(nid)] = node
+    return node_map
+
 
 def print_toc(tree, indent=0):
     for node in tree:

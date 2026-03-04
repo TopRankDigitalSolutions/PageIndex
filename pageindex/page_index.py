@@ -270,23 +270,21 @@ def toc_index_extractor(toc, content, model=None):
 def toc_transformer(toc_content, model=None):
     print('start toc_transformer')
     init_prompt = """
-    You are given a table of contents, You job is to transform the whole table of content into a JSON format included table_of_contents.
+You are given a table of contents. Your job is to transform the whole table of contents into a single JSON object with one key, "table_of_contents", whose value is an array of section objects.
 
-    structure is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
+"structure" is the numeric hierarchy index (e.g. "1", "1.1", "1.2"). "title" is the section title. "page" is the page number or null.
 
-    The response should be in the following JSON format: 
-    {
-    table_of_contents: [
-        {
-            "structure": <structure index, "x.x.x" or None> (string),
-            "title": <title of the section>,
-            "page": <page number or None>,
-        },
-        ...
-        ],
-    }
-    You should transform the full table of contents in one go.
-    Directly return the final JSON structure, do not output anything else. """
+Output exactly one JSON object in this form (use quoted keys; valid JSON only):
+{"table_of_contents": [
+  {"structure": "1", "title": "Section title", "page": 1},
+  {"structure": "1.1", "title": "Subsection", "page": null},
+  ...
+]}
+
+Rules:
+- Transform the full table of contents in one go.
+- Output only this single JSON object. Do not add any explanation, thinking, markdown code fences (e.g. ```json), or a second JSON object before or after.
+"""
 
     prompt = init_prompt + '\n Given table of contents\n:' + toc_content
     last_complete, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
@@ -302,16 +300,15 @@ def toc_transformer(toc_content, model=None):
         if position != -1:
             last_complete = last_complete[:position+2]
         prompt = f"""
-        Your task is to continue the table of contents json structure, directly output the remaining part of the json structure.
-        The response should be in the following JSON format: 
+Your task is to continue the table of contents JSON. Output only the remaining part of the JSON (the continuation that completes the "table_of_contents" array). Do not repeat the beginning, and do not add any explanation or extra text before or after.
 
-        The raw table of contents json structure is:
-        {toc_content}
+Raw table of contents:
+{toc_content}
 
-        The incomplete transformed table of contents json structure is:
-        {last_complete}
+Incomplete JSON so far (you will append the rest):
+{last_complete}
 
-        Please continue the json structure, directly output the remaining part of the json structure."""
+Output only the continuation (the remaining array elements and closing brackets). Nothing else."""
 
         new_complete, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
 
@@ -322,7 +319,15 @@ def toc_transformer(toc_content, model=None):
         if_complete = check_if_toc_transformation_is_complete(toc_content, last_complete, model)
         
 
-    last_complete = json.loads(last_complete)
+    try:
+        last_complete = json.loads(last_complete)
+    except json.JSONDecodeError as e:
+        if "Extra data" in str(e):
+            last_complete = extract_first_json_object(last_complete)
+            if last_complete is None:
+                raise ValueError("LLM returned malformed JSON (multiple objects or trailing text); could not extract table_of_contents.") from e
+        else:
+            raise
 
     cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
     return cleaned_response
@@ -1074,7 +1079,8 @@ def page_index_main(doc, opt=None):
     async def page_index_builder():
         structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
         if opt.if_add_node_id == 'yes':
-            write_node_id(structure)    
+            write_node_id(structure)
+        propagate_parent_page_ranges(structure)  # parent start/end span all children
         if opt.if_add_node_text == 'yes':
             add_node_text(structure, page_list)
         if opt.if_add_node_summary == 'yes':
