@@ -1081,6 +1081,7 @@ def page_index_main(doc, opt=None):
         if opt.if_add_node_id == 'yes':
             write_node_id(structure)
         propagate_parent_page_ranges(structure)  # parent start/end span all children
+        clamp_structure_to_page_range(structure, len(page_list))  # clamp to actual page count, fix inverted ranges
         if opt.if_add_node_text == 'yes':
             add_node_text(structure, page_list)
         if opt.if_add_node_summary == 'yes':

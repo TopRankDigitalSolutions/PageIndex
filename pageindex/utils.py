@@ -265,6 +265,38 @@ def propagate_parent_page_ranges(tree):
         tree['end_index'] = max(ends)
 
 
+def clamp_structure_to_page_range(tree, total_pages):
+    """
+    Clamp every node's start_index and end_index to [1, total_pages], and fix
+    invalid ranges (start_index > end_index) so the structure is valid for the
+    actual document length. Call after propagate_parent_page_ranges.
+    """
+    if total_pages is None or total_pages < 1:
+        return
+    if isinstance(tree, list):
+        for item in tree:
+            clamp_structure_to_page_range(item, total_pages)
+        return
+    if not isinstance(tree, dict):
+        return
+    for key in ('start_index', 'end_index'):
+        val = tree.get(key)
+        if val is not None:
+            try:
+                v = int(val)
+                v = max(1, min(total_pages, v))
+                tree[key] = v
+            except (TypeError, ValueError):
+                pass
+    start = tree.get('start_index')
+    end = tree.get('end_index')
+    if start is not None and end is not None and start > end:
+        tree['end_index'] = start
+    if tree.get('nodes'):
+        for child in tree['nodes']:
+            clamp_structure_to_page_range(child, total_pages)
+
+
 def get_leaf_nodes(structure):
     if isinstance(structure, dict):
         if not structure['nodes']:
