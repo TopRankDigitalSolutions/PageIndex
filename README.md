@@ -141,13 +141,40 @@ You can generate the PageIndex tree structure with this open-source repo, or use
 
 You can follow these steps to generate a PageIndex tree from a PDF document.
 
-### 1. Install dependencies
+### 1. Create and activate a virtual environment (recommended)
+
+**macOS:** Use Python from Homebrew so the venv uses OpenSSL (avoids the urllib3/LibreSSL warning):
+
+```bash
+# Install Python with OpenSSL (if needed)
+brew install python@3.12
+
+# Create venv with Homebrew Python (Apple Silicon: /opt/homebrew — Intel: /usr/local)
+/opt/homebrew/bin/python3.12 -m venv venv
+# OR on Intel Mac: /usr/local/bin/python3.12 -m venv venv
+
+source venv/bin/activate
+```
+
+**Linux / Windows (or macOS with system Python):**
+
+```bash
+python3 -m venv venv
+
+# Activate (macOS/Linux)
+source venv/bin/activate
+
+# Windows (Command Prompt): venv\Scripts\activate.bat
+# Windows (PowerShell): venv\Scripts\Activate.ps1
+```
+
+### 2. Install dependencies
 
 ```bash
 pip3 install --upgrade -r requirements.txt
 ```
 
-### 2. Set your OpenAI API key
+### 3. Set your OpenAI API key
 
 Create a `.env` file in the root directory and add your API key:
 
@@ -155,11 +182,56 @@ Create a `.env` file in the root directory and add your API key:
 CHATGPT_API_KEY=your_openai_key_here
 ```
 
-### 3. Run PageIndex on your PDF
+### 4. Run PageIndex on your PDF
 
 ```bash
 python3 run_pageindex.py --pdf_path /path/to/your/document.pdf
 ```
+
+The script writes a **tree-structure JSON** to `results/<document_name>_structure.json`. That file is the **PageIndex** for your document: a hierarchical “table of contents” with section titles, summaries, and page ranges (`start_index`–`end_index`).
+
+**What to do with the JSON**
+
+This repo covers **step 1** of PageIndex (build the index). The JSON is the input for **step 2: reasoning-based retrieval** — using the tree to find which sections are relevant to a question, then pulling those pages and answering with an LLM. You can use it in several ways:
+
+- **Cookbooks** — [Vectorless RAG](https://github.com/VectifyAI/PageIndex/blob/main/cookbook/pageindex_RAG_simple.ipynb) and [Vision RAG](https://github.com/VectifyAI/PageIndex/blob/main/cookbook/vision_RAG_pageindex.ipynb) show the full flow (tree + retrieval + Q&A) via the PageIndex API; you can adapt them to use your local JSON and PDF.
+- **Chat / MCP / API** — For a ready-made chat-over-documents experience, use the [Chat Platform](https://chat.pageindex.ai), [MCP](https://pageindex.ai/mcp), or [API](https://docs.pageindex.ai/quickstart) and upload your document there; they run both indexing and retrieval for you.
+
+So: the JSON is your document’s index; use it (or the cloud services) to run retrieval and Q&A over that document.
+
+### 5. Query the document (reasoning-based retrieval)
+
+After you have a structure JSON from step 4, you can run **Step 2** of the vectorless RAG flow locally: **tree search**. The script `run_query.py` sends your question and the document tree (titles + summaries) to the LLM and returns which nodes are relevant, plus the model's reasoning.
+
+**Usage:**
+
+```bash
+python run_query.py --structure_path ./results/<document_name>_structure.json --query "Your question here"
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--structure_path` | Yes | Path to the `*_structure.json` file (e.g. `results/my_doc_structure.json`). |
+| `--query` | Yes | Question to ask about the document. |
+| `--model` | No | OpenAI model for tree search (default: `gpt-4o-2024-11-20`). |
+
+**Example:**
+
+```bash
+python run_query.py \
+  --structure_path ./results/NEST+RFI_Market+Survey_structure.json \
+  --query "What are the submission instructions and due date?"
+```
+
+**Output:** The script prints the LLM's **reasoning** (which sections it chose and why) and the **retrieved nodes** (node ID, page, title). You can then use those node IDs with the PDF (e.g. extract text for those page ranges) to run **Step 3** (answer generation) yourself, or adapt the [Vectorless RAG notebook](https://github.com/VectifyAI/PageIndex/blob/main/cookbook/pageindex_RAG_simple.ipynb) to use your local JSON and this script. The same `CHATGPT_API_KEY` from `.env` is used for the tree-search call.
+
+<details>
+<summary><strong>Troubleshooting: urllib3 / OpenSSL warning on macOS</strong></summary>
+<br>
+If you see <code>NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL'</code>, your venv was created with a Python built against LibreSSL. Fix it by switching to Homebrew Python: run the **macOS** steps in **step 1** above (install <code>python@3.12</code> via Homebrew, then <code>deactivate</code>, <code>rm -rf venv</code>, create a new venv with the Homebrew Python, <code>source venv/bin/activate</code>, and <code>pip install --upgrade -r requirements.txt</code>).
+</details>
 
 <details>
 <summary><strong>Optional parameters</strong></summary>
@@ -175,6 +247,35 @@ You can customize the processing with additional optional arguments:
 --if-add-node-summary   Add node summary (yes/no, default: yes)
 --if-add-doc-description Add doc description (yes/no, default: yes)
 ```
+</details>
+
+<details>
+<summary><strong>Rate limits and validating the structure JSON</strong></summary>
+<br>
+<code>run_pageindex.py</code> calls the OpenAI API many times (TOC detection, extraction, verification, fixing incorrect entries, summaries). If you hit <strong>429 (rate limit)</strong> errors during a run:
+
+- The script <strong>retries each failed call up to 10 times</strong> (with a 1s delay). If the API still returns an error, that call returns <code>"Error"</code> and the pipeline may continue with partial or wrong data.
+- The run can still finish and write a JSON file. So <strong>seeing 429s in the log means the output is suspect</strong> — one or more steps may have failed.
+
+<strong>How to tell if the JSON is still valid:</strong>
+
+1. **Check the log** — If you saw <code>************* Retrying *************</code> and <code>429</code> / <code>rate_limit_exceeded</code>, treat the run as unreliable. Re-run later (e.g. after a minute) when your token-per-minute quota resets, or use a model/tier with higher limits.
+
+2. **Search the JSON for error placeholders** — If any step returned the string <code>"Error"</code>, it might appear in the file:
+   <pre>grep -n "Error" ./results/your_doc_structure.json</pre>
+   If you see matches (other than inside normal text like "Error handling"), the structure may be corrupted.
+
+3. **Validate structure and page ranges** — Every node should have <code>node_id</code>, <code>start_index</code>, <code>end_index</code>, and <code>title</code>. Page indices should be within the document (e.g. 1 to N for an N-page PDF) and <code>start_index ≤ end_index</code>. If a section’s bounds look wrong (e.g. a 2-page section spanning 20 pages), the fix step may have failed due to rate limits.
+
+4. **Re-run when limits reset** — Wait for your [OpenAI rate limit](https://platform.openai.com/account/rate-limits) window to reset, then run <code>run_pageindex.py</code> again on the same PDF. Compare the new JSON with the previous one; if they differ a lot or the new one has more plausible sections, the first run was likely affected by 429s.
+
+5. **Run the validator** — Use <code>validate_structure.py</code> to check the JSON for obvious issues (no <code>"Error"</code> in the file, valid page ranges, optional page count):
+
+   ```bash
+   python validate_structure.py ./results/your_doc_structure.json [--expected-pages N]
+   ```
+
+   Exit code 0 means the structure is consistent; exit code 1 lists the issues found. This does not guarantee the TOC is semantically correct, but it catches corruption and invalid bounds.
 </details>
 
 <details>
